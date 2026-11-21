@@ -538,21 +538,67 @@ public final class AnimeVietsubClient {
             throws IOException, ExtractionException {
         final String baseUrl = resolveBaseUrl(downloader);
         final String normalizedUrl = normalizeSiteUrl(targetUrl, baseUrl);
-        final Document doc = fetchWithBypass(downloader, normalizedUrl, baseUrl);
+        Document doc = fetchWithBypass(downloader, normalizedUrl, baseUrl);
 
-        final List<ServerData> activeServers = new ArrayList<>();
+        final List<ResolvedStream> resolvedStreams = new ArrayList<>();
+
+        // 1. Check inline window.PLAYER_DATA first if present on the fetched watch page
+        final String docHtml = doc.html();
+        final Matcher pdMatcher = Pattern.compile("window\\.PLAYER_DATA\\s*=\\s*(\\{.*?\\});").matcher(docHtml);
+        if (pdMatcher.find()) {
+            try {
+                final JsonObject pdJson = JsonParser.object().from(pdMatcher.group(1));
+                final ResolvedStream inlineStream = parsePlayerResponseJson(downloader, baseUrl, "VIP", pdJson);
+                if (inlineStream != null) {
+                    resolvedStreams.add(inlineStream);
+                    return resolvedStreams;
+                }
+            } catch (final Exception ignored) {
+            }
+        }
+
+        // 2. Match the active episode element by URL path, filmInfo.episodeID, or .active class
         Elements activeEls = doc.select("a.btn-episode.active, a.episode-link.active, .list-episode a.active");
         if (activeEls.isEmpty()) {
-            // If user opened a show URL directly without an episode path, pick the first episode
+            // Try matching by filmInfo.episodeID = parseInt('12345') or window._epID = 12345
+            final Matcher epIdMatcher = Pattern.compile("(?:episodeID\\s*=\\s*parseInt\\(['\"]|_epID\\s*=\\s*|/tap-[^/]+-)(\\d+)").matcher(docHtml + " " + normalizedUrl);
+            if (epIdMatcher.find()) {
+                final String epId = epIdMatcher.group(1);
+                activeEls = doc.select("a.episode-link[data-id='" + epId + "'], .list-episode a[data-id='" + epId + "']");
+            }
+        }
+        if (activeEls.isEmpty()) {
+            // Match by href ending
+            for (final Element a : doc.select("ul.list-episode > li > a.btn-episode, div.list-episode a, .list-episode a")) {
+                final String href = a.attr("href");
+                if (!href.isEmpty() && normalizedUrl.endsWith(href)) {
+                    activeEls.add(a);
+                }
+            }
+        }
+        if (activeEls.isEmpty()) {
             final Element firstEp = doc.selectFirst("ul.list-episode > li > a.btn-episode, div.list-episode a, .list-episode a");
             if (firstEp != null) {
                 activeEls = new Elements(firstEp);
             } else if (!normalizedUrl.endsWith("/xem-phim.html")) {
                 final String watchUrl = stripTrailingSlash(normalizedUrl) + "/xem-phim.html";
-                final Document watchDoc = fetchWithBypass(downloader, watchUrl, baseUrl);
-                activeEls = watchDoc.select("a.btn-episode.active, a.episode-link.active, .list-episode a.active");
+                doc = fetchWithBypass(downloader, watchUrl, baseUrl);
+                final String watchHtml = doc.html();
+                final Matcher watchPdMatcher = Pattern.compile("window\\.PLAYER_DATA\\s*=\\s*(\\{.*?\\});").matcher(watchHtml);
+                if (watchPdMatcher.find()) {
+                    try {
+                        final JsonObject pdJson = JsonParser.object().from(watchPdMatcher.group(1));
+                        final ResolvedStream inlineStream = parsePlayerResponseJson(downloader, baseUrl, "VIP", pdJson);
+                        if (inlineStream != null) {
+                            resolvedStreams.add(inlineStream);
+                            return resolvedStreams;
+                        }
+                    } catch (final Exception ignored) {
+                    }
+                }
+                activeEls = doc.select("a.btn-episode.active, a.episode-link.active, .list-episode a.active");
                 if (activeEls.isEmpty()) {
-                    final Element firstWatchEp = watchDoc.selectFirst("ul.list-episode > li > a.btn-episode, div.list-episode a, .list-episode a");
+                    final Element firstWatchEp = doc.selectFirst("ul.list-episode > li > a.btn-episode, div.list-episode a, .list-episode a");
                     if (firstWatchEp != null) {
                         activeEls = new Elements(firstWatchEp);
                     }
@@ -560,6 +606,7 @@ public final class AnimeVietsubClient {
             }
         }
 
+        final List<ServerData> activeServers = new ArrayList<>();
         for (final Element el : activeEls) {
             final String hash = el.attr("data-hash").trim();
             final String id = el.attr("data-id").trim();
@@ -576,7 +623,6 @@ public final class AnimeVietsubClient {
             }
         }
 
-        final List<ResolvedStream> resolvedStreams = new ArrayList<>();
         for (final ServerData server : activeServers) {
             try {
                 final ResolvedStream rs = fetchPlayerLink(downloader, baseUrl, server);
@@ -606,6 +652,13 @@ public final class AnimeVietsubClient {
         mergeResponseCookies(resp);
 
         final JsonObject json = JsonParser.object().from(resp.responseBody());
+        return parsePlayerResponseJson(downloader, baseUrl, server.groupName, json);
+    }
+
+    private ResolvedStream parsePlayerResponseJson(final Downloader downloader,
+                                                   final String baseUrl,
+                                                   final String groupName,
+                                                   final JsonObject json) {
         final Object linkObj = json.get("link");
         final String playTech = json.getString("playTech", "");
 
@@ -624,7 +677,7 @@ public final class AnimeVietsubClient {
                         reqHeaders.put("User-Agent", USER_AGENT);
                         reqHeaders.put("Referer", baseUrl + "/");
                         return new ResolvedStream(
-                                server.groupName,
+                                groupName,
                                 file,
                                 true,
                                 null,
@@ -641,7 +694,7 @@ public final class AnimeVietsubClient {
         if (link == null || link.trim().isEmpty()) {
             return null;
         }
-        if (!"iframe".equals(playTech) && link.contains("googleapiscdn.com")) {
+        if (link.contains("googleapiscdn.com")) {
             final PlaylistResult playlist = decryptGoogleApisCdn(downloader, link);
             if (playlist != null) {
                 final Map<String, String> reqHeaders = new LinkedHashMap<>();
@@ -649,7 +702,7 @@ public final class AnimeVietsubClient {
                 reqHeaders.put("Referer", "https://stream.googleapiscdn.com/");
                 reqHeaders.put("Origin", "https://stream.googleapiscdn.com");
                 return new ResolvedStream(
-                        server.groupName,
+                        groupName,
                         playlist.text,
                         false,
                         playlist.url,
@@ -658,13 +711,13 @@ public final class AnimeVietsubClient {
                         reqHeaders
                 );
             }
-        } else if (link.startsWith("http")) {
+        } else if (!"iframe".equals(playTech) && link.startsWith("http")) {
             final boolean isHls = link.contains(".m3u8");
             final Map<String, String> reqHeaders = new LinkedHashMap<>();
             reqHeaders.put("User-Agent", USER_AGENT);
             reqHeaders.put("Referer", baseUrl + "/");
             return new ResolvedStream(
-                    server.groupName,
+                    groupName,
                     link,
                     true,
                     null,

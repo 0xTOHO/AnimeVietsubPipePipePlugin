@@ -1,0 +1,2 @@
+rootProject.name = 'animevietsub'
+include ':tools'

@@ -1,7 +1,7 @@
 {
   "plugins":[{
     "apiVersion":"1.0",
-    "package":"animevietsub-4.ppp",
+    "package":"https://raw.githubusercontent.com/0xTOHO/AnimeVietsubPipePipePlugin/main/animevietsub-4.ppp",
     "sha256":"2a1968f13b25576460d74ddf9f119af8c20145ffd51e12385d0881e04a43b1a0",
     "signature":"A501L8kEQFGRxNFMEjPf8zpOXkP0fB+Te9qboHcsLf46eGAOPv6U/p4RO8RX/O+yVYNMVhpo4diom5WKBSipAw==",
     "nsfw":false,
@@ -13,6 +13,6 @@
     "versionName":"1.0.3",
     "versionCode":4
   }],
-  "name":"My PipePipe Plugins",
+  "name":"AnimeVietsub PipePipe Repository",
   "formatVersion":1
 }

@@ -1,8 +1,8 @@
 {
   "pluginId": "recloudstream.animevietsub",
   "name": "AnimeVietsub",
-  "versionCode": 3,
-  "versionName": "1.0.2",
+  "versionCode": 4,
+  "versionName": "1.0.3",
   "apiVersion": "1.0",
   "author": "CloudStream Port",
   "entryClass": "recloudstream.animevietsub.AnimeVietsubPlugin",

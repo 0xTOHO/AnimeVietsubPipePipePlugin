@@ -701,10 +701,12 @@ public final class AnimeVietsubClient {
                 reqHeaders.put("User-Agent", USER_AGENT);
                 reqHeaders.put("Referer", "https://stream.googleapiscdn.com/");
                 reqHeaders.put("Origin", "https://stream.googleapiscdn.com");
+                final String dataUri = "data:application/vnd.apple.mpegurl;base64,"
+                        + Base64.getEncoder().encodeToString(playlist.text.getBytes(StandardCharsets.UTF_8));
                 return new ResolvedStream(
                         groupName,
-                        playlist.text,
-                        false,
+                        dataUri,
+                        true,
                         playlist.url,
                         "1080p",
                         true,

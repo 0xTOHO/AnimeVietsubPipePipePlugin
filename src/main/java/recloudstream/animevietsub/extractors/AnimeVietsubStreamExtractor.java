@@ -145,7 +145,7 @@ public final class AnimeVietsubStreamExtractor extends StreamExtractor {
     @Override
     public String getHlsUrl() throws ParsingException {
         for (final ResolvedStream rs : resolvedStreams) {
-            if (rs.isHls && rs.isUrl) {
+            if (rs.isHls && rs.isUrl && rs.content.startsWith("http")) {
                 return rs.content;
             }
         }

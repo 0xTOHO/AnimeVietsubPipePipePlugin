@@ -620,7 +620,18 @@ public final class AnimeVietsubClient {
                     final String type = itemObj.getString("type", "");
                     if (file.startsWith("http")) {
                         final boolean isHls = file.contains(".m3u8") || "hls".equalsIgnoreCase(type);
-                        return new ResolvedStream(server.groupName, file, label, isHls);
+                        final Map<String, String> reqHeaders = new LinkedHashMap<>();
+                        reqHeaders.put("User-Agent", USER_AGENT);
+                        reqHeaders.put("Referer", baseUrl + "/");
+                        return new ResolvedStream(
+                                server.groupName,
+                                file,
+                                true,
+                                null,
+                                label,
+                                isHls,
+                                reqHeaders
+                        );
                     }
                 }
             }
@@ -633,11 +644,34 @@ public final class AnimeVietsubClient {
         if (!"iframe".equals(playTech) && link.contains("googleapiscdn.com")) {
             final PlaylistResult playlist = decryptGoogleApisCdn(downloader, link);
             if (playlist != null) {
-                return new ResolvedStream(server.groupName, playlist.url, "1080p", true);
+                final Map<String, String> reqHeaders = new LinkedHashMap<>();
+                reqHeaders.put("User-Agent", USER_AGENT);
+                reqHeaders.put("Referer", "https://stream.googleapiscdn.com/");
+                reqHeaders.put("Origin", "https://stream.googleapiscdn.com");
+                return new ResolvedStream(
+                        server.groupName,
+                        playlist.text,
+                        false,
+                        playlist.url,
+                        "1080p",
+                        true,
+                        reqHeaders
+                );
             }
         } else if (link.startsWith("http")) {
             final boolean isHls = link.contains(".m3u8");
-            return new ResolvedStream(server.groupName, link, "720p", isHls);
+            final Map<String, String> reqHeaders = new LinkedHashMap<>();
+            reqHeaders.put("User-Agent", USER_AGENT);
+            reqHeaders.put("Referer", baseUrl + "/");
+            return new ResolvedStream(
+                    server.groupName,
+                    link,
+                    true,
+                    null,
+                    "720p",
+                    isHls,
+                    reqHeaders
+            );
         }
         return null;
     }
@@ -1098,15 +1132,27 @@ public final class AnimeVietsubClient {
 
     public static final class ResolvedStream {
         public final String serverName;
-        public final String url;
+        public final String content;
+        public final boolean isUrl;
+        public final String manifestUrl;
         public final String resolution;
         public final boolean isHls;
+        public final Map<String, String> headers;
 
-        public ResolvedStream(final String serverName, final String url, final String resolution, final boolean isHls) {
+        public ResolvedStream(final String serverName,
+                              final String content,
+                              final boolean isUrl,
+                              final String manifestUrl,
+                              final String resolution,
+                              final boolean isHls,
+                              final Map<String, String> headers) {
             this.serverName = serverName;
-            this.url = url;
+            this.content = content;
+            this.isUrl = isUrl;
+            this.manifestUrl = manifestUrl;
             this.resolution = resolution;
             this.isHls = isHls;
+            this.headers = headers;
         }
     }
 }

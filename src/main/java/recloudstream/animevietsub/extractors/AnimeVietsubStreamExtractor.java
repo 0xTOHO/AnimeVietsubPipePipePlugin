@@ -145,8 +145,8 @@ public final class AnimeVietsubStreamExtractor extends StreamExtractor {
     @Override
     public String getHlsUrl() throws ParsingException {
         for (final ResolvedStream rs : resolvedStreams) {
-            if (rs.isHls) {
-                return rs.url;
+            if (rs.isHls && rs.isUrl) {
+                return rs.content;
             }
         }
         return "";
@@ -161,14 +161,20 @@ public final class AnimeVietsubStreamExtractor extends StreamExtractor {
     public List<VideoStream> getVideoStreams() throws IOException, ExtractionException {
         final List<VideoStream> list = new ArrayList<>();
         for (final ResolvedStream rs : resolvedStreams) {
-            list.add(new VideoStream.Builder()
+            final VideoStream.Builder builder = new VideoStream.Builder()
                     .setId(rs.serverName != null ? rs.serverName : VideoStream.ID_UNKNOWN)
-                    .setContent(rs.url, true)
+                    .setContent(rs.content, rs.isUrl)
                     .setIsVideoOnly(false)
                     .setMediaFormat(MediaFormat.MPEG_4)
                     .setResolution(rs.resolution != null ? rs.resolution : "720p")
-                    .setDeliveryMethod(rs.isHls ? DeliveryMethod.HLS : DeliveryMethod.PROGRESSIVE_HTTP)
-                    .build());
+                    .setDeliveryMethod(rs.isHls ? DeliveryMethod.HLS : DeliveryMethod.PROGRESSIVE_HTTP);
+            if (rs.manifestUrl != null && !rs.manifestUrl.isEmpty()) {
+                builder.setManifestUrl(rs.manifestUrl);
+            }
+            if (rs.headers != null && !rs.headers.isEmpty()) {
+                builder.setRequestHeaders(rs.headers);
+            }
+            list.add(builder.build());
         }
         return list;
     }

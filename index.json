@@ -1,20 +1,18 @@
 {
-  "plugins": [
-    {
-      "apiVersion": "1.0",
-      "package": "https://raw.githubusercontent.com/0xTOHO/AnimeVietsubPipePipePlugin/main/animevietsub-3.ppp",
-      "sha256": "5e4068d5c8a4148315a0fb25558a2a6fe9aceab65fc56dde48973845b2babac1",
-      "signature": "2lRnwFrxhtyBP+C+OTs3zlMm70Oh79TQlhHOfK3ix5Ri+1l+BOV1fh7gd2COxSTNOa1qTPZ7/rStfMG41bWXAw==",
-      "nsfw": false,
-      "pluginId": "recloudstream.animevietsub",
-      "author": "CloudStream Port",
-      "name": "AnimeVietsub",
-      "description": "Xem anime Vietsub từ AnimeVietsub (port từ CloudStream Animevietsub.cs3)",
-      "publicKey": "/EK3cS6wZvkVlfMjV3y0U6x4432T3ezi/kP2yiId5nI=",
-      "versionName": "1.0.2",
-      "versionCode": 3
-    }
-  ],
-  "name": "AnimeVietsub PipePipe Repository",
-  "formatVersion": 1
+  "plugins":[{
+    "apiVersion":"1.0",
+    "package":"animevietsub-4.ppp",
+    "sha256":"2a1968f13b25576460d74ddf9f119af8c20145ffd51e12385d0881e04a43b1a0",
+    "signature":"A501L8kEQFGRxNFMEjPf8zpOXkP0fB+Te9qboHcsLf46eGAOPv6U/p4RO8RX/O+yVYNMVhpo4diom5WKBSipAw==",
+    "nsfw":false,
+    "pluginId":"recloudstream.animevietsub",
+    "author":"CloudStream Port",
+    "name":"AnimeVietsub",
+    "description":"Xem anime Vietsub từ AnimeVietsub (port từ CloudStream Animevietsub.cs3)",
+    "publicKey":"/EK3cS6wZvkVlfMjV3y0U6x4432T3ezi/kP2yiId5nI=",
+    "versionName":"1.0.3",
+    "versionCode":4
+  }],
+  "name":"My PipePipe Plugins",
+  "formatVersion":1
 }

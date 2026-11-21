@@ -754,13 +754,53 @@ public final class AnimeVietsubClient {
                 try {
                     final String decryptedM3u8 = fetchDecryptPlaylist(downloader, playlistUrl, avsToken, playerUrl);
                     if (decryptedM3u8 != null && !decryptedM3u8.trim().isEmpty()) {
-                        return new PlaylistResult(playlistUrl, decryptedM3u8);
+                        final String inlinedKeysM3u8 = inlineExtXKeys(downloader, decryptedM3u8, playerUrl);
+                        return new PlaylistResult(playlistUrl, inlinedKeysM3u8);
                     }
                 } catch (final Exception ignored) {
                 }
             }
         }
         return null;
+    }
+
+    private String inlineExtXKeys(final Downloader downloader,
+                                  final String m3u8Text,
+                                  final String referer) {
+        final Pattern keyUriPattern = Pattern.compile("(#EXT-X-KEY:[^\n]*?URI=\")(https?://[^\"]+)(\")");
+        final Matcher matcher = keyUriPattern.matcher(m3u8Text);
+        final Map<String, String> keyDataUriCache = new LinkedHashMap<>();
+        final StringBuffer sb = new StringBuffer();
+
+        while (matcher.find()) {
+            final String prefix = matcher.group(1);
+            final String keyUrl = matcher.group(2);
+            final String suffix = matcher.group(3);
+            String replacementUri = keyDataUriCache.get(keyUrl);
+            if (replacementUri == null) {
+                try {
+                    final Response keyResp = downloader.get(keyUrl, getBypassHeaders(referer));
+                    mergeResponseCookies(keyResp);
+                    byte[] keyBytes = keyResp.rawResponseBody();
+                    if ((keyBytes == null || keyBytes.length == 0) && keyResp.responseBody() != null) {
+                        keyBytes = keyResp.responseBody().getBytes(StandardCharsets.ISO_8859_1);
+                    }
+                    if (keyBytes != null && keyBytes.length == 16) {
+                        replacementUri = "data:application/octet-stream;base64,"
+                                + Base64.getEncoder().encodeToString(keyBytes);
+                        keyDataUriCache.put(keyUrl, replacementUri);
+                    }
+                } catch (final Exception ignored) {
+                }
+            }
+            if (replacementUri != null) {
+                matcher.appendReplacement(sb, Matcher.quoteReplacement(prefix + replacementUri + suffix));
+            } else {
+                matcher.appendReplacement(sb, Matcher.quoteReplacement(matcher.group(0)));
+            }
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
     }
 
     private String fetchDecryptPlaylist(final Downloader downloader,

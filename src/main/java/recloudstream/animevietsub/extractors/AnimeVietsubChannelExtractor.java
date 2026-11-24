@@ -20,6 +20,7 @@ import org.schabi.newpipe.extractor.stream.StreamType;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -56,18 +57,22 @@ public final class AnimeVietsubChannelExtractor extends ChannelExtractor {
         }
         final String watchUrl = AnimeVietsubClient.stripTrailingSlash(showUrl) + "/xem-phim.html";
 
+        final CompletableFuture<Document> watchFuture = CompletableFuture.supplyAsync(() -> {
+            try {
+                return client.fetchWithBypass(downloader, watchUrl, showUrl);
+            } catch (final Exception ignored) {
+                return null;
+            }
+        }, AnimeVietsubClient.getIoPool());
+
         final Document infoDoc = client.fetchWithBypass(downloader, showUrl, baseUrl);
         showTitle = AnimeVietsubClient.extractTitle(infoDoc);
         posterUrl = AnimeVietsubClient.extractPosterUrl(infoDoc, baseUrl);
         bannerUrl = AnimeVietsubClient.extractBannerUrl(infoDoc, baseUrl, posterUrl);
         description = AnimeVietsubClient.extractDescription(infoDoc);
 
-        try {
-            final Document watchDoc = client.fetchWithBypass(downloader, watchUrl, showUrl);
-            episodes = AnimeVietsubClient.parseEpisodes(watchDoc, baseUrl);
-        } catch (final Exception ignored) {
-            episodes = AnimeVietsubClient.parseEpisodes(infoDoc, baseUrl);
-        }
+        final Document watchDoc = watchFuture.join();
+        episodes = AnimeVietsubClient.parseEpisodes(watchDoc != null ? watchDoc : infoDoc, baseUrl);
     }
 
     @Nonnull

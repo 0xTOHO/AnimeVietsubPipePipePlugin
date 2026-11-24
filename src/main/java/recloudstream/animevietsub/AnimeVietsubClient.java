@@ -28,6 +28,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -74,8 +78,40 @@ public final class AnimeVietsubClient {
             Pattern.compile("/hls/[0-9a-f]{24}\\.ts\\?e=");
     private static final Pattern HLS_SEGMENT_PATTERN =
             Pattern.compile("/hls/([0-9a-f]{24})\\.ts");
+    private static final Pattern PLAYER_DATA_PATTERN =
+            Pattern.compile("window\\.PLAYER_DATA\\s*=\\s*(\\{.*?\\});");
+    private static final Pattern EPISODE_ID_PATTERN =
+            Pattern.compile("(?:episodeID\\s*=\\s*parseInt\\(['\"]|_epID\\s*=\\s*|/tap-[^/]+-)(\\d+)");
+    private static final Pattern KEY_URI_PATTERN =
+            Pattern.compile("(#EXT-X-KEY:[^\\n]*?URI=\")(https?://[^\"]+)(\")");
+
+    private static final long DOC_CACHE_TTL_MS = 60_000L;
+    private static final int DOC_CACHE_MAX_SIZE = 16;
+
+    private static final ExecutorService IO_POOL = Executors.newCachedThreadPool(r -> {
+        final Thread t = new Thread(r, "avs-io");
+        t.setDaemon(true);
+        return t;
+    });
+
+    private static final class CachedDoc {
+        final Document doc;
+        final long timestampMs;
+
+        CachedDoc(final Document doc, final long timestampMs) {
+            this.doc = doc;
+            this.timestampMs = timestampMs;
+        }
+    }
 
     private final PluginPreferences preferences;
+    private final Map<String, String> cookieJar = new ConcurrentHashMap<>();
+    private final Map<String, CachedDoc> docCache = new LinkedHashMap<String, CachedDoc>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(final Map.Entry<String, CachedDoc> eldest) {
+            return size() > DOC_CACHE_MAX_SIZE;
+        }
+    };
     private volatile String activeDomain;
     private volatile String globalCookies = "";
 
@@ -84,7 +120,7 @@ public final class AnimeVietsubClient {
     }
 
     public String getConfiguredUrl() {
-        final String pref = preferences.getString("base_url");
+        final String pref = preferences != null ? preferences.getString("base_url") : null;
         if (pref == null || pref.trim().isEmpty()) {
             return DEFAULT_ENTRY_URL;
         }
@@ -115,7 +151,7 @@ public final class AnimeVietsubClient {
     }
 
     public Map<String, List<String>> getBypassHeaders(final String referer) {
-        final Map<String, List<String>> headers = new LinkedHashMap<>();
+        final Map<String, List<String>> headers = new LinkedHashMap<>(8);
         headers.put("Accept", Collections.singletonList(
                 "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"));
         headers.put("Accept-Language", Collections.singletonList("vi,en-US;q=0.9,en;q=0.8"));
@@ -131,38 +167,33 @@ public final class AnimeVietsubClient {
         return headers;
     }
 
-    private synchronized void mergeResponseCookies(final Response response) {
+    private void mergeResponseCookies(final Response response) {
         if (response == null || response.responseHeaders() == null) {
             return;
         }
-        final List<String> newCookies = new ArrayList<>();
+        boolean changed = false;
         for (final Map.Entry<String, List<String>> entry : response.responseHeaders().entrySet()) {
             if ("set-cookie".equalsIgnoreCase(entry.getKey()) && entry.getValue() != null) {
-                newCookies.addAll(entry.getValue());
-            }
-        }
-        if (newCookies.isEmpty()) {
-            return;
-        }
-        final Map<String, String> cookieMap = new LinkedHashMap<>();
-        if (globalCookies != null && !globalCookies.isEmpty()) {
-            for (final String part : globalCookies.split(";")) {
-                final String[] kv = part.split("=", 2);
-                if (kv.length == 2) {
-                    cookieMap.put(kv[0].trim(), kv[1].trim());
+                for (final String raw : entry.getValue()) {
+                    final int semi = raw.indexOf(';');
+                    final String clean = semi >= 0 ? raw.substring(0, semi) : raw;
+                    final int eq = clean.indexOf('=');
+                    if (eq > 0) {
+                        final String k = clean.substring(0, eq).trim();
+                        final String v = clean.substring(eq + 1).trim();
+                        final String prev = cookieJar.put(k, v);
+                        if (!v.equals(prev)) {
+                            changed = true;
+                        }
+                    }
                 }
             }
         }
-        for (final String raw : newCookies) {
-            final int semi = raw.indexOf(';');
-            final String clean = semi >= 0 ? raw.substring(0, semi) : raw;
-            final String[] kv = clean.split("=", 2);
-            if (kv.length == 2) {
-                cookieMap.put(kv[0].trim(), kv[1].trim());
-            }
+        if (!changed) {
+            return;
         }
         final StringBuilder sb = new StringBuilder();
-        for (final Map.Entry<String, String> e : cookieMap.entrySet()) {
+        for (final Map.Entry<String, String> e : cookieJar.entrySet()) {
             if (sb.length() > 0) {
                 sb.append("; ");
             }
@@ -171,9 +202,21 @@ public final class AnimeVietsubClient {
         globalCookies = sb.toString();
     }
 
+    public static ExecutorService getIoPool() {
+        return IO_POOL;
+    }
+
     public Document fetchWithBypass(final Downloader downloader,
                                     final String initialUrl,
                                     final String referer) throws IOException, ExtractionException {
+        final long now = System.currentTimeMillis();
+        synchronized (docCache) {
+            final CachedDoc cached = docCache.get(initialUrl);
+            if (cached != null && (now - cached.timestampMs) < DOC_CACHE_TTL_MS) {
+                return cached.doc;
+            }
+        }
+
         String currentUrl = initialUrl;
         Response resp = downloader.get(currentUrl, getBypassHeaders(referer));
         mergeResponseCookies(resp);
@@ -209,7 +252,14 @@ public final class AnimeVietsubClient {
             mergeResponseCookies(resp);
             html = resp.responseBody();
         }
-        return Jsoup.parse(html != null ? html : "", currentUrl);
+        final Document parsed = Jsoup.parse(html != null ? html : "", currentUrl);
+        synchronized (docCache) {
+            docCache.put(initialUrl, new CachedDoc(parsed, System.currentTimeMillis()));
+            if (!currentUrl.equals(initialUrl)) {
+                docCache.put(currentUrl, new CachedDoc(parsed, System.currentTimeMillis()));
+            }
+        }
+        return parsed;
     }
 
     public String normalizeSiteUrl(final String url, final String baseUrl) {
@@ -538,13 +588,24 @@ public final class AnimeVietsubClient {
             throws IOException, ExtractionException {
         final String baseUrl = resolveBaseUrl(downloader);
         final String normalizedUrl = normalizeSiteUrl(targetUrl, baseUrl);
-        Document doc = fetchWithBypass(downloader, normalizedUrl, baseUrl);
+        final Document doc = fetchWithBypass(downloader, normalizedUrl, baseUrl);
+        return resolveStreamsForWatchDoc(downloader, normalizedUrl, doc, baseUrl);
+    }
 
+    /**
+     * Resolves playable video streams using an already-fetched watch Document to avoid redundant HTTP requests.
+     */
+    public List<ResolvedStream> resolveStreamsForWatchDoc(final Downloader downloader,
+                                                          final String normalizedUrl,
+                                                          final Document preloadedDoc,
+                                                          final String baseUrl)
+            throws IOException, ExtractionException {
+        Document doc = preloadedDoc != null ? preloadedDoc : fetchWithBypass(downloader, normalizedUrl, baseUrl);
         final List<ResolvedStream> resolvedStreams = new ArrayList<>();
 
         // 1. Check inline window.PLAYER_DATA first if present on the fetched watch page
         final String docHtml = doc.html();
-        final Matcher pdMatcher = Pattern.compile("window\\.PLAYER_DATA\\s*=\\s*(\\{.*?\\});").matcher(docHtml);
+        final Matcher pdMatcher = PLAYER_DATA_PATTERN.matcher(docHtml);
         if (pdMatcher.find()) {
             try {
                 final JsonObject pdJson = JsonParser.object().from(pdMatcher.group(1));
@@ -560,15 +621,13 @@ public final class AnimeVietsubClient {
         // 2. Match the active episode element by URL path, filmInfo.episodeID, or .active class
         Elements activeEls = doc.select("a.btn-episode.active, a.episode-link.active, .list-episode a.active");
         if (activeEls.isEmpty()) {
-            // Try matching by filmInfo.episodeID = parseInt('12345') or window._epID = 12345
-            final Matcher epIdMatcher = Pattern.compile("(?:episodeID\\s*=\\s*parseInt\\(['\"]|_epID\\s*=\\s*|/tap-[^/]+-)(\\d+)").matcher(docHtml + " " + normalizedUrl);
+            final Matcher epIdMatcher = EPISODE_ID_PATTERN.matcher(docHtml + " " + normalizedUrl);
             if (epIdMatcher.find()) {
                 final String epId = epIdMatcher.group(1);
                 activeEls = doc.select("a.episode-link[data-id='" + epId + "'], .list-episode a[data-id='" + epId + "']");
             }
         }
         if (activeEls.isEmpty()) {
-            // Match by href ending
             for (final Element a : doc.select("ul.list-episode > li > a.btn-episode, div.list-episode a, .list-episode a")) {
                 final String href = a.attr("href");
                 if (!href.isEmpty() && normalizedUrl.endsWith(href)) {
@@ -584,7 +643,7 @@ public final class AnimeVietsubClient {
                 final String watchUrl = stripTrailingSlash(normalizedUrl) + "/xem-phim.html";
                 doc = fetchWithBypass(downloader, watchUrl, baseUrl);
                 final String watchHtml = doc.html();
-                final Matcher watchPdMatcher = Pattern.compile("window\\.PLAYER_DATA\\s*=\\s*(\\{.*?\\});").matcher(watchHtml);
+                final Matcher watchPdMatcher = PLAYER_DATA_PATTERN.matcher(watchHtml);
                 if (watchPdMatcher.find()) {
                     try {
                         final JsonObject pdJson = JsonParser.object().from(watchPdMatcher.group(1));
@@ -623,13 +682,33 @@ public final class AnimeVietsubClient {
             }
         }
 
-        for (final ServerData server : activeServers) {
+        if (activeServers.size() == 1) {
             try {
-                final ResolvedStream rs = fetchPlayerLink(downloader, baseUrl, server);
+                final ResolvedStream rs = fetchPlayerLink(downloader, baseUrl, activeServers.get(0));
                 if (rs != null) {
                     resolvedStreams.add(rs);
                 }
             } catch (final Exception ignored) {
+            }
+        } else if (activeServers.size() > 1) {
+            final List<CompletableFuture<ResolvedStream>> futures = new ArrayList<>(activeServers.size());
+            for (final ServerData server : activeServers) {
+                futures.add(CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return fetchPlayerLink(downloader, baseUrl, server);
+                    } catch (final Exception ignored) {
+                        return null;
+                    }
+                }, IO_POOL));
+            }
+            for (final CompletableFuture<ResolvedStream> f : futures) {
+                try {
+                    final ResolvedStream rs = f.join();
+                    if (rs != null) {
+                        resolvedStreams.add(rs);
+                    }
+                } catch (final Exception ignored) {
+                }
             }
         }
         return resolvedStreams;
@@ -767,40 +846,82 @@ public final class AnimeVietsubClient {
     private String inlineExtXKeys(final Downloader downloader,
                                   final String m3u8Text,
                                   final String referer) {
-        final Pattern keyUriPattern = Pattern.compile("(#EXT-X-KEY:[^\n]*?URI=\")(https?://[^\"]+)(\")");
-        final Matcher matcher = keyUriPattern.matcher(m3u8Text);
-        final Map<String, String> keyDataUriCache = new LinkedHashMap<>();
-        final StringBuffer sb = new StringBuffer();
+        final Matcher collectMatcher = KEY_URI_PATTERN.matcher(m3u8Text);
+        final List<String> uniqueUrls = new ArrayList<>();
+        final Map<String, Boolean> seen = new LinkedHashMap<>();
+        while (collectMatcher.find()) {
+            final String keyUrl = collectMatcher.group(2);
+            if (!seen.containsKey(keyUrl)) {
+                seen.put(keyUrl, Boolean.TRUE);
+                uniqueUrls.add(keyUrl);
+            }
+        }
+        if (uniqueUrls.isEmpty()) {
+            return m3u8Text;
+        }
 
-        while (matcher.find()) {
-            final String prefix = matcher.group(1);
-            final String keyUrl = matcher.group(2);
-            final String suffix = matcher.group(3);
-            String replacementUri = keyDataUriCache.get(keyUrl);
-            if (replacementUri == null) {
+        final Map<String, String> keyDataUriCache = new ConcurrentHashMap<>(uniqueUrls.size());
+        if (uniqueUrls.size() == 1) {
+            final String url = uniqueUrls.get(0);
+            final String dataUri = fetchKeyAsDataUri(downloader, url, referer);
+            if (dataUri != null) {
+                keyDataUriCache.put(url, dataUri);
+            }
+        } else {
+            final List<CompletableFuture<Void>> futures = new ArrayList<>(uniqueUrls.size());
+            for (final String url : uniqueUrls) {
+                futures.add(CompletableFuture.runAsync(() -> {
+                    final String dataUri = fetchKeyAsDataUri(downloader, url, referer);
+                    if (dataUri != null) {
+                        keyDataUriCache.put(url, dataUri);
+                    }
+                }, IO_POOL));
+            }
+            for (final CompletableFuture<Void> f : futures) {
                 try {
-                    final Response keyResp = downloader.get(keyUrl, getBypassHeaders(referer));
-                    mergeResponseCookies(keyResp);
-                    byte[] keyBytes = keyResp.rawResponseBody();
-                    if ((keyBytes == null || keyBytes.length == 0) && keyResp.responseBody() != null) {
-                        keyBytes = keyResp.responseBody().getBytes(StandardCharsets.ISO_8859_1);
-                    }
-                    if (keyBytes != null && keyBytes.length == 16) {
-                        replacementUri = "data:application/octet-stream;base64,"
-                                + Base64.getEncoder().encodeToString(keyBytes);
-                        keyDataUriCache.put(keyUrl, replacementUri);
-                    }
+                    f.join();
                 } catch (final Exception ignored) {
                 }
             }
+        }
+
+        if (keyDataUriCache.isEmpty()) {
+            return m3u8Text;
+        }
+        final Matcher replaceMatcher = KEY_URI_PATTERN.matcher(m3u8Text);
+        final StringBuilder sb = new StringBuilder(m3u8Text.length());
+        while (replaceMatcher.find()) {
+            final String prefix = replaceMatcher.group(1);
+            final String keyUrl = replaceMatcher.group(2);
+            final String suffix = replaceMatcher.group(3);
+            final String replacementUri = keyDataUriCache.get(keyUrl);
             if (replacementUri != null) {
-                matcher.appendReplacement(sb, Matcher.quoteReplacement(prefix + replacementUri + suffix));
+                replaceMatcher.appendReplacement(sb, Matcher.quoteReplacement(prefix + replacementUri + suffix));
             } else {
-                matcher.appendReplacement(sb, Matcher.quoteReplacement(matcher.group(0)));
+                replaceMatcher.appendReplacement(sb, Matcher.quoteReplacement(replaceMatcher.group(0)));
             }
         }
-        matcher.appendTail(sb);
+        replaceMatcher.appendTail(sb);
         return sb.toString();
+    }
+
+    private String fetchKeyAsDataUri(final Downloader downloader,
+                                     final String keyUrl,
+                                     final String referer) {
+        try {
+            final Response keyResp = downloader.get(keyUrl, getBypassHeaders(referer));
+            mergeResponseCookies(keyResp);
+            byte[] keyBytes = keyResp.rawResponseBody();
+            if ((keyBytes == null || keyBytes.length == 0) && keyResp.responseBody() != null) {
+                keyBytes = keyResp.responseBody().getBytes(StandardCharsets.ISO_8859_1);
+            }
+            if (keyBytes != null && keyBytes.length == 16) {
+                return "data:application/octet-stream;base64,"
+                        + Base64.getEncoder().encodeToString(keyBytes);
+            }
+        } catch (final Exception ignored) {
+        }
+        return null;
     }
 
     private String fetchDecryptPlaylist(final Downloader downloader,
@@ -994,65 +1115,84 @@ public final class AnimeVietsubClient {
 
     private String decryptM3u8SegmentUrls(final String intermediateM3u8, final String jtiOdd) {
         final String[] lines = intermediateM3u8.split("\n");
-        final List<String> outLines = new ArrayList<>(Arrays.asList(lines));
+        final List<String> cleanLines = new ArrayList<>(lines.length);
 
-        for (int i = 0; i < lines.length; i++) {
-            final String line = lines[i].trim();
+        Mac mac = null;
+        Cipher cipher = null;
+        try {
+            mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(jtiOdd.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            cipher = Cipher.getInstance("AES/CTR/NoPadding");
+        } catch (final Exception ignored) {
+        }
+        final Map<String, SecretKeySpec> keyCache = new HashMap<>();
+        final byte[] counter = new byte[16];
+
+        for (final String rawLine : lines) {
+            if (rawLine.contains("urn:avs:shield")) {
+                continue;
+            }
+            final String line = rawLine.trim();
             if (line.startsWith("#") || line.isEmpty()) {
+                cleanLines.add(rawLine);
                 continue;
             }
             final Matcher m = HLS_SEGMENT_PATTERN.matcher(line);
             if (!m.find()) {
+                cleanLines.add(rawLine);
                 continue;
             }
-            try {
-                final String fileId = m.group(1);
-                final int qIdx = line.indexOf('?');
-                final Map<String, String> params = new LinkedHashMap<>();
-                if (qIdx >= 0) {
-                    final String query = line.substring(qIdx + 1);
-                    for (final String p : query.split("&")) {
-                        final int eq = p.indexOf('=');
-                        if (eq >= 0) {
-                            params.put(p.substring(0, eq), p.substring(eq + 1));
+            String resolvedLine = null;
+            if (mac != null && cipher != null) {
+                try {
+                    final String fileId = m.group(1);
+                    String eParam = null;
+                    int iParam = 0;
+                    final int qIdx = line.indexOf('?');
+                    if (qIdx >= 0) {
+                        final String query = line.substring(qIdx + 1);
+                        int start = 0;
+                        while (start < query.length()) {
+                            final int amp = query.indexOf('&', start);
+                            final int end = amp >= 0 ? amp : query.length();
+                            final int eq = query.indexOf('=', start);
+                            if (eq > start && eq < end) {
+                                final String key = query.substring(start, eq);
+                                if ("e".equals(key)) {
+                                    eParam = query.substring(eq + 1, end);
+                                } else if ("i".equals(key)) {
+                                    try {
+                                        iParam = Integer.parseInt(query.substring(eq + 1, end));
+                                    } catch (final NumberFormatException ignored) {
+                                    }
+                                }
+                            }
+                            start = end + 1;
                         }
                     }
-                }
-                final String eParam = params.get("e");
-                if (eParam == null) {
-                    continue;
-                }
-                int iParam = 0;
-                final String iStr = params.get("i");
-                if (iStr != null) {
-                    try {
-                        iParam = Integer.parseInt(iStr);
-                    } catch (final NumberFormatException ignored) {
+                    if (eParam != null) {
+                        SecretKeySpec keySpec = keyCache.get(fileId);
+                        if (keySpec == null) {
+                            final byte[] aesKey = mac.doFinal(("url-cipher|" + fileId).getBytes(StandardCharsets.UTF_8));
+                            keySpec = new SecretKeySpec(aesKey, "AES");
+                            keyCache.put(fileId, keySpec);
+                        }
+                        counter[12] = (byte) ((iParam >> 24) & 255);
+                        counter[13] = (byte) ((iParam >> 16) & 255);
+                        counter[14] = (byte) ((iParam >> 8) & 255);
+                        counter[15] = (byte) (iParam & 255);
+                        cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(counter));
+                        final byte[] decrypted = cipher.doFinal(b64UrlDecode(eParam));
+                        final String decryptedUrl = new String(decrypted, StandardCharsets.UTF_8);
+                        if (decryptedUrl.startsWith("http")) {
+                            resolvedLine = decryptedUrl;
+                        }
                     }
+                } catch (final Exception ignored) {
                 }
-                final Mac mac = Mac.getInstance("HmacSHA256");
-                mac.init(new SecretKeySpec(jtiOdd.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-                final byte[] aesKey = mac.doFinal(("url-cipher|" + fileId).getBytes(StandardCharsets.UTF_8));
-                final byte[] counter = new byte[16];
-                counter[12] = (byte) ((iParam >> 24) & 255);
-                counter[13] = (byte) ((iParam >> 16) & 255);
-                counter[14] = (byte) ((iParam >> 8) & 255);
-                counter[15] = (byte) (iParam & 255);
-                final Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding");
-                cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(aesKey, "AES"), new IvParameterSpec(counter));
-                final byte[] decrypted = cipher.doFinal(b64UrlDecode(eParam));
-                final String decryptedUrl = new String(decrypted, StandardCharsets.UTF_8);
-                if (decryptedUrl.startsWith("http")) {
-                    outLines.set(i, decryptedUrl);
-                }
-            } catch (final Exception ignored) {
             }
-        }
-
-        final List<String> cleanLines = new ArrayList<>();
-        for (final String l : outLines) {
-            if (!l.contains("urn:avs:shield") && !HLS_SEGMENT_PATTERN.matcher(l).find()) {
-                cleanLines.add(l);
+            if (resolvedLine != null) {
+                cleanLines.add(resolvedLine);
             }
         }
         return String.join("\n", cleanLines);

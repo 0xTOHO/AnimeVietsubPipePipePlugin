@@ -59,18 +59,30 @@ public final class AnimeVietsubStreamExtractor extends StreamExtractor {
         baseUrl = client.resolveBaseUrl(downloader);
         final String targetUrl = client.normalizeSiteUrl(getUrl(), baseUrl);
         watchDoc = client.fetchWithBypass(downloader, targetUrl, baseUrl);
-
         showUrl = deriveShowUrl(targetUrl);
-        try {
-            infoDoc = client.fetchWithBypass(downloader, showUrl, baseUrl);
-        } catch (final Exception ignored) {
+
+        showTitle = AnimeVietsubClient.extractTitle(watchDoc);
+        posterUrl = AnimeVietsubClient.extractPosterUrl(watchDoc, baseUrl);
+        descriptionText = AnimeVietsubClient.extractDescription(watchDoc);
+
+        if (descriptionText.isEmpty() || posterUrl.isEmpty()) {
+            try {
+                infoDoc = client.fetchWithBypass(downloader, showUrl, baseUrl);
+                if (showTitle.isEmpty() || "AnimeVietsub".equals(showTitle)) {
+                    showTitle = AnimeVietsubClient.extractTitle(infoDoc);
+                }
+                if (posterUrl.isEmpty()) {
+                    posterUrl = AnimeVietsubClient.extractPosterUrl(infoDoc, baseUrl);
+                }
+                if (descriptionText.isEmpty()) {
+                    descriptionText = AnimeVietsubClient.extractDescription(infoDoc);
+                }
+            } catch (final Exception ignored) {
+                infoDoc = watchDoc;
+            }
+        } else {
             infoDoc = watchDoc;
         }
-
-        final Document metaDoc = infoDoc != null ? infoDoc : watchDoc;
-        showTitle = AnimeVietsubClient.extractTitle(metaDoc);
-        posterUrl = AnimeVietsubClient.extractPosterUrl(metaDoc, baseUrl);
-        descriptionText = AnimeVietsubClient.extractDescription(metaDoc);
 
         final Element activeEp = watchDoc.selectFirst("a.btn-episode.active, a.episode-link.active, .list-episode a.active");
         if (activeEp != null) {
@@ -82,7 +94,7 @@ public final class AnimeVietsubStreamExtractor extends StreamExtractor {
         }
 
         episodes = AnimeVietsubClient.parseEpisodes(watchDoc, baseUrl);
-        resolvedStreams = client.resolveStreamsForWatchUrl(downloader, targetUrl);
+        resolvedStreams = client.resolveStreamsForWatchDoc(downloader, targetUrl, watchDoc, baseUrl);
     }
 
     private static String deriveShowUrl(final String episodeUrl) {
